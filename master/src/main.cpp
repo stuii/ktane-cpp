@@ -9,11 +9,6 @@
 #include <Fonts/FreeMonoBold24pt7b.h>
 #include <Fonts/FreeMono9pt7b.h>
 
-struct Port {
-  String name;
-  int count;
-};
-
 struct Label {
   String label;
   bool lit;
@@ -38,6 +33,7 @@ void doScanForRequests();
 void initializeRequestPins();
 void discoverModules();
 byte sendCommand(byte address, String command);
+void broadcastToAllModules(String command);
 int findRequestPin();
 void enableModule(byte i2cAddress, int requestPin);
 void enableModuleInterrupt();
@@ -56,12 +52,13 @@ int ACTIVE_MODULES = 0;
 int MODULE_COUNT = 8;
 int MODULE_ADDRESSES[] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
 int ASSIGNED_REQUEST_PINS[] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
+int randomnessSeed = 0;
 
 const bool debug = true;
 bool scanForRequest = false;
 
 /* PIN DEFINITIONS */
-const byte RANDOMNESS_SOURCE = A1;
+const uint8_t RANDOMNESS_SOURCE = A1;
 const int REQUEST_INTERRUPT_PIN = 2;
 const int MENU_DISPLAY_CS_PIN = 46;
 const int MENU_DISPLAY_RST_PIN = 44;
@@ -79,11 +76,15 @@ const int SERIAL_DISPLAY_HEIGHT = 122; // DEPG0213BN
 const int maxPortsTotal = 5;
 const int maxPortsPerType = 2;
 const String possiblePorts[] = {"VGA", "PS2", "RJ45", "RCA"};
+
 // Labels
 const int maxLabels = 4;
 const String possibleLabels[] = {"SND", "CLR", "CAR", "IND", "FRQ", "SIG", "NSA", "MSA", "TRN", "BOB", "FRK"};
+
 // Batteries
-const int maxBatteriesTotal = 8;
+const int maxBatteriesTotal = 6;
+const int maxBatteriesAA = 6;
+const int maxBatteriesD = 2;
 const String possibleBatteryTypes[] = {"AA", "D"};
 
 
@@ -91,9 +92,14 @@ const String possibleBatteryTypes[] = {"AA", "D"};
 int baseLives = 3;
 int baseTime = 180;
 String serialNumber = "";
-Port bombPorts[maxPortsTotal] = {};
 Label bombLabels[maxLabels] = {};
 int generatedLabelCount = 0;
+int portCountVGA = 0;
+int portCountPS2 = 0;
+int portCountRJ45 = 0;
+int portCountRCA = 0;
+int batteryCountAA = 0;
+int batteryCountD = 0;
 
 /* EINK SERIAL DISPLAY */
 const int SERIAL_DISPLAY_ROTATION = 1;
@@ -122,12 +128,12 @@ void setup()
 
   pinMode(18, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(18), rotaryEncoderButtonPressed, CHANGE);
-  
+  Wire.begin();
+  discoverModules();
+
   setupGame();
   provisionModules();
 
-  Wire.begin();
- // discoverModules();
  // enableModuleInterrupt();
 
  // displaySerialNumber();
@@ -146,7 +152,8 @@ void loop()
 }
 
 void seedRandomness() {
-  randomSeed(analogRead(RANDOMNESS_SOURCE));
+  randomnessSeed = analogRead(RANDOMNESS_SOURCE);
+  randomSeed(randomnessSeed);
 }
 
 void generateSerialNumber(int length) {
@@ -223,8 +230,18 @@ int findRequestPin() {
 }
 
 byte sendCommand(byte address, String command) {
+  int commandLength = command.length();
+  for (int i = 0; i < commandLength; i += 32) {
+    String chunk = command.substring(i, min(i + 32, commandLength));
+      Wire.beginTransmission(address);
+      Wire.print(chunk);
+      Wire.endTransmission();
+      delay(10); // Short delay to ensure the slave can process the data
+  }
+  Serial.print("Sent command to 0x");
+  Serial.println(address, HEX);
   Wire.beginTransmission(address);
-  Wire.print(command);
+  Wire.print('\0');
   return Wire.endTransmission();
 }
 
@@ -448,6 +465,8 @@ void testMenu() {
 void setupGame() {
   generateSerialNumber();
   generateLabels();
+  generateBatteries();
+  generatePorts();
 }
 
 void provisionModules() {
@@ -456,8 +475,13 @@ void provisionModules() {
   provision["data"]["serial"] = serialNumber;
   provision["data"]["lives"] = baseLives;
   provision["data"]["time"] = baseTime;
-  //provision["data"]["ports"] = bombPorts;
-  //provision["data"]["batteries"] = bombLabels;
+  provision["data"]["seed"] = randomnessSeed;
+  provision["data"]["ports"]["VGA"] = portCountVGA;
+  provision["data"]["ports"]["RJ45"] = portCountRJ45;
+  provision["data"]["ports"]["RCA"] = portCountRCA;
+  provision["data"]["ports"]["PS2"] = portCountPS2;
+  provision["data"]["batteries"]["AA"] = batteryCountAA;
+  provision["data"]["batteries"]["D"] = batteryCountD;
   for (int i = 0; i < generatedLabelCount; i++) {
     provision["data"]["labels"][i]["label"] = bombLabels[i].label;
     provision["data"]["labels"][i]["lit"] = bombLabels[i].lit;
@@ -466,15 +490,14 @@ void provisionModules() {
   String provisionCommand;
   serializeJson(provision, provisionCommand);
 
-  Serial.println(provisionCommand);
+  broadcastToAllModules(provisionCommand);
 
-  
+  Serial.println(provisionCommand);
 }
 
 void generateLabels() {
   int labelsToGenerate = random(0, maxLabels);
-  Serial.println(labelsToGenerate);
-
+  
   int usedLabels[4] = {-1, -1, -1, -1};
   for (int i = 0; i < labelsToGenerate; i++) {
       int labelIndex = random(0, 11);
@@ -500,4 +523,23 @@ bool intIssetInArray(int haystack[], int search) {
     }
   }
   return false;
+}
+
+void generateBatteries() {
+  batteryCountAA = random(0, maxBatteriesAA);
+  batteryCountD = random(0, min(maxBatteriesTotal - batteryCountAA, maxBatteriesD));
+}
+
+void generatePorts() {
+  portCountVGA = random(0, maxPortsPerType);
+  portCountPS2 = random(0, min(maxPortsPerType, maxPortsTotal - portCountVGA));
+  portCountRJ45 = random(0, min(maxPortsPerType, maxPortsTotal - portCountVGA - portCountPS2));
+  portCountRCA = random(0, min(maxPortsPerType, maxPortsTotal - portCountVGA - portCountPS2 - portCountRJ45));
+}
+
+void broadcastToAllModules(String command) {
+  for (int i = 0; i < ACTIVE_MODULES; i++) {
+    if (MODULE_ADDRESSES[i] == 0xFF) { continue; }
+    sendCommand(MODULE_ADDRESSES[i], command);
+  }
 }
