@@ -4,10 +4,12 @@
 #include <stdlib.h>
 #include <GxEPD2_BW.h>
 #include <Adafruit_GFX.h>    // Core graphics library
+#include <Adafruit_ST7735.h> // Hardware-specific library for ST7735
 #include <Adafruit_ST7789.h> // Hardware-specific library for ST7789
 #include <SPI.h>
 #include <Fonts/FreeMonoBold24pt7b.h>
 #include <Fonts/FreeMono9pt7b.h>
+#include <RotaryEncoder.h>
 
 struct Label {
   String label;
@@ -26,7 +28,11 @@ void startGame();
 void initializeMenuDisplay();
 void displayMenu();
 String getTimeForDisplay();
-void rotaryEncoderButtonPressed();
+
+void initializeLabelDisplays();
+void testMenu();
+void checkRotEnc();
+void checkRotEncButton();
 
 void seedRandomness();
 void doScanForRequests();
@@ -47,6 +53,8 @@ bool intIssetInArray(int haystack[], int search);
 #define MODULE_START_ADDRESS 0x00  // Starting I2C address
 #define MODULE_END_ADDRESS 0x7F    // Ending I2C address
 const int REQUEST_PINS[] = { /*23,*/ 24, 25, 26, 27, 28, 29, 30, 31/*, 32, 33*/ };
+int LABEL_PINS[] = { 11, 12, 14, 16 };
+//Adafruit_ST7735 LABEL_OBEJCTS[4];
 
 int ACTIVE_MODULES = 0;
 int MODULE_COUNT = 8;
@@ -69,7 +77,9 @@ const int SERIAL_DISPLAY_DC_PIN = 5; // default 0
 const int SERIAL_DISPLAY_BUSY_PIN = 15; // default 15
 const int SERIAL_DISPLAY_WIDTH = 250; // SSD1680
 const int SERIAL_DISPLAY_HEIGHT = 122; // DEPG0213BN
-
+const int ROTENC_BTN = 19;
+const int ROTENC_A = 22;
+const int ROTENC_B = 23;
 
 /* GAME BOUNDARIES */
 // Ports
@@ -90,7 +100,7 @@ const String possibleBatteryTypes[] = {"AA", "D"};
 
 /* GAME SETTINGS */
 int baseLives = 3;
-int baseTime = 180;
+int baseTime = 480;
 String serialNumber = "";
 Label bombLabels[maxLabels] = {};
 int generatedLabelCount = 0;
@@ -113,6 +123,17 @@ Adafruit_ST7789 menuDisplay = Adafruit_ST7789(MENU_DISPLAY_CS_PIN, MENU_DISPLAY_
 int menuCursorPosition = 1;
 int selectedMenuPosition = 0;
 
+/* ROTARY ENCODER */
+RotaryEncoder encoder(ROTENC_A, ROTENC_B, RotaryEncoder::LatchMode::FOUR3);
+int globalPos = 0;
+int rotEncButtonState = HIGH;            // the current reading from the input pin
+int rotEncLastButtonState = HIGH;  // the previous reading from the input pin
+
+// the following variables are unsigned longs because the time, measured in
+// milliseconds, will quickly become a bigger number than can be stored in an int.
+unsigned long rotEncLastDebounceTime = 0;  // the last time the output pin was toggled
+unsigned long rotEncDebounceDelay = 50;    // the debounce time; increase if the output flickers
+
 void setup()
 {
   if (debug) {
@@ -123,20 +144,22 @@ void setup()
   //delay(random(100,300));
   seedRandomness();
   initializeRequestPins();
- // initializeSerialDisplay();
- // initializeMenuDisplay();
+  //initializeSerialDisplay();
+  initializeMenuDisplay();
+  displayMenu();
 
   pinMode(18, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(18), rotaryEncoderButtonPressed, CHANGE);
   Wire.begin();
-  discoverModules();
+  //discoverModules();
 
   setupGame();
-  provisionModules();
+  //testMenu();
+  //initializeLabelDisplays();
+  //provisionModules();
 
  // enableModuleInterrupt();
 
- // displaySerialNumber();
+  displaySerialNumber();
  // delay(5000);
  // blankSerialNumber();
   /*
@@ -149,6 +172,8 @@ void setup()
 void loop()
 {
   doScanForRequests();
+  checkRotEncButton();
+  checkRotEnc();
 }
 
 void seedRandomness() {
@@ -321,6 +346,7 @@ void blankSerialNumber() {
 }
 
 void initializeMenuDisplay() {
+  pinMode(ROTENC_BTN, INPUT);
   menuDisplay.init(240, 320); // Init ST7789 320x240
   menuDisplay.setRotation(MENU_DISPLAY_ROTATION);
   menuDisplay.fillScreen(ST77XX_BLACK);
@@ -332,8 +358,10 @@ void displayMenu() {
   menuDisplay.setTextWrap(false);
   menuDisplay.setTextColor(ST77XX_WHITE);
   menuDisplay.setTextSize(2);
-
   int yOffset = (menuCursorPosition*30) - 30;
+  if (menuCursorPosition == 3) {
+    yOffset = 190;
+  }
   menuDisplay.fillTriangle(10, 8 + yOffset, 18, 16 + yOffset, 10, 24 + yOffset, ST77XX_WHITE);
 
   menuDisplay.setCursor(30, 10);
@@ -344,7 +372,7 @@ void displayMenu() {
   }
   menuDisplay.println("Lives:");
 
-  menuDisplay.fillRect(260, 0, 60, 80, ST77XX_BLACK);
+  menuDisplay.fillRect(240, 0, 80, 80, ST77XX_BLACK);
 
   if (baseLives == 3) {
     menuDisplay.fillRect(289, 7, 25, 20, ST77XX_WHITE);
@@ -374,7 +402,11 @@ void displayMenu() {
   menuDisplay.println("Time:");
 
   menuDisplay.setTextColor(ST77XX_WHITE);
-  menuDisplay.setCursor(262, 40);
+  if (baseTime >= 600) {
+    menuDisplay.setCursor(250, 40);
+  } else {
+    menuDisplay.setCursor(262, 40);
+  }
   String displayTime = getTimeForDisplay();
   menuDisplay.println(displayTime);
 
@@ -395,72 +427,6 @@ String getTimeForDisplay() {
   return output;
 }
 
-void rotaryEncoderButtonPressed() {
-  baseTime += 10;
-  displayMenu();
-}
-
-void testMenu() {
-  
-  displayMenu();
-  delay(500);
-  menuCursorPosition = 2;
-  displayMenu();
-  delay(500);
-  menuCursorPosition = 1;
-  displayMenu();
-  delay(500);
-  menuCursorPosition = 2;
-  displayMenu();
-  delay(500);
-  menuCursorPosition = 1;
-  displayMenu();
-  delay(500);
-  selectedMenuPosition = 1;
-  displayMenu();
-  delay(500);
-  baseLives = 1;
-  displayMenu();
-  delay(500);
-  baseLives = 3;
-  displayMenu();
-  delay(500);
-  baseLives = 1;
-  displayMenu();
-  delay(500);
-  selectedMenuPosition = 0;
-  displayMenu();
-  delay(500);
-  menuCursorPosition = 2;
-  displayMenu();
-  delay(500);
-  selectedMenuPosition = 2;
-  displayMenu();
-  delay(250);
-  baseTime -= 10;
-  displayMenu();
-  delay(250);
-  baseTime -= 10;
-  displayMenu();
-  delay(250);
-  baseTime -= 10;
-  displayMenu();
-  delay(250);
-  baseTime -= 10;
-  displayMenu();
-  delay(250);
-  baseTime -= 10;
-  displayMenu();
-  delay(250);
-  baseTime -= 10;
-  displayMenu();
-  delay(100);
-  for (int z = 0; z < 100; z++) {
-    baseTime += 10;
-    displayMenu();
-    delay(80);
-  }
-}
 
 void setupGame() {
   generateSerialNumber();
@@ -496,7 +462,8 @@ void provisionModules() {
 }
 
 void generateLabels() {
-  int labelsToGenerate = random(0, maxLabels);
+  //int labelsToGenerate = random(0, maxLabels);
+  int labelsToGenerate = 4;
   
   int usedLabels[4] = {-1, -1, -1, -1};
   for (int i = 0; i < labelsToGenerate; i++) {
@@ -542,4 +509,92 @@ void broadcastToAllModules(String command) {
     if (MODULE_ADDRESSES[i] == 0xFF) { continue; }
     sendCommand(MODULE_ADDRESSES[i], command);
   }
+}
+void initializeLabelDisplays() {
+  /*const size_t n = sizeof(LABEL_PINS) / sizeof(LABEL_PINS[0]);
+
+  for (size_t i = 0; i < n - 1; i++)
+  {
+      size_t j = random(0, n - i);
+      int t = LABEL_PINS[i];
+      LABEL_PINS[i] = LABEL_PINS[j];
+      LABEL_PINS[j] = t;
+  }
+  */
+  for (int i = 0; i < 4; i++) {
+    Adafruit_ST7735 tft = Adafruit_ST7735(LABEL_PINS[i], /* DC */6, /* MOSI */7, /* SCK*/ 8, 9);
+    tft.initR(INITR_MINI160x80_PLUGIN);
+    tft.setRotation(3);
+    tft.fillScreen(ST7735_WHITE);
+    
+    tft.setTextWrap(false);
+    tft.setTextSize(7);
+    tft.setTextColor(ST77XX_BLACK);
+    tft.setCursor(20, 20);
+    if (generatedLabelCount >= i) {
+      tft.println(bombLabels[i].label);
+    }
+    //LABEL_OBEJCTS[i] = tft;
+  }
+}
+  
+void checkRotEnc() {
+  encoder.tick();
+  int newPos = encoder.getPosition();
+  if (globalPos != newPos) {
+    int direction = (globalPos > newPos ? -1 : 1);
+    if (selectedMenuPosition == 0) {
+      int newCursorPosition = menuCursorPosition + direction;
+      if (newCursorPosition <= 1) {
+        menuCursorPosition = 1;
+      } else if (newCursorPosition >= 3) {
+        menuCursorPosition = 3;
+      } else {
+        menuCursorPosition = newCursorPosition;
+      }
+    } else if (selectedMenuPosition == 1) {
+      if (baseLives == 1 && direction == 1) {
+        baseLives = 3;
+      } else if (baseLives == 3 && direction == -1) {
+        baseLives = 1;
+      }
+    } else if (selectedMenuPosition == 2) {
+      if (direction == -1) {
+        baseTime -= 10;
+      } else if (direction == 1) {
+        baseTime += 10;
+      }
+      if (baseTime <= 60) {
+        baseTime = 60;
+      }
+      if (baseTime >= 900) {
+        baseTime = 900;
+      }
+
+    }
+    globalPos = newPos;
+    displayMenu();
+  }
+}
+
+void checkRotEncButton() {
+   int reading = digitalRead(ROTENC_BTN);
+  if (reading != rotEncLastButtonState) {
+    rotEncLastDebounceTime = millis();
+  }
+
+  if ((millis() - rotEncLastDebounceTime) > rotEncDebounceDelay) {
+    if (reading != rotEncButtonState) {
+      rotEncButtonState = reading;
+      if (rotEncButtonState == LOW) {
+        if (selectedMenuPosition == 0) {
+        selectedMenuPosition = menuCursorPosition;
+        } else {
+          selectedMenuPosition = 0;
+        }
+        displayMenu();
+      }
+    }
+  }
+  rotEncLastButtonState = reading;
 }
