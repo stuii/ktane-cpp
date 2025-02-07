@@ -10,6 +10,19 @@
 #include <Fonts/FreeMonoBold24pt7b.h>
 #include <Fonts/FreeMono9pt7b.h>
 #include <RotaryEncoder.h>
+#include <TimerOne.h>
+#include <TimerFive.h>
+#include <SD.h>
+#include <TMRpcm.h>
+
+/*
+ * TODOS:
+ * - SD Card
+ * - PCM speaker
+ * - Battery Display
+ * - Ports Display
+ * -> external clock (with piezo)
+ */
 
 struct Label {
   String label;
@@ -20,6 +33,13 @@ void generateSerialNumber(int length = 8);
 void initializeSerialDisplay();
 void displaySerialNumber();
 void blankSerialNumber();
+void initializeLabelLEDs();
+void initializeMistakeLEDs();
+void enableMistakeLED();
+
+void initializeClock();
+void startClock();
+void stopClock();
 
 void setupGame();
 void provisionModules();
@@ -28,18 +48,21 @@ void startGame();
 void initializeMenuDisplay();
 void displayMenu();
 String getTimeForDisplay();
+void blankMenuDisplay();
+void displayTextOnMenuDisplay(String message);
 
 void initializeLabelDisplays();
-void testMenu();
+void displayLabels();
 void checkRotEnc();
 void checkRotEncButton();
 
 void seedRandomness();
-void doScanForRequests();
+void doScanForRequests(bool alwaysCheck = false);
 void initializeRequestPins();
 void discoverModules();
 byte sendCommand(byte address, String command);
 void broadcastToAllModules(String command);
+String readFromModule(int address);
 int findRequestPin();
 void enableModule(byte i2cAddress, int requestPin);
 void enableModuleInterrupt();
@@ -50,16 +73,29 @@ void generateBatteries();
 void generatePorts();
 bool intIssetInArray(int haystack[], int search);
 
+bool checkReady();
+void checkSolved();
+void checkMistakes();
+void markModuleAsSolved(int moduleId);
+void addMistakeFromModule(int moduleId);
+
 #define MODULE_START_ADDRESS 0x00  // Starting I2C address
 #define MODULE_END_ADDRESS 0x7F    // Ending I2C address
 const int REQUEST_PINS[] = { /*23,*/ 24, 25, 26, 27, 28, 29, 30, 31/*, 32, 33*/ };
 int LABEL_PINS[] = { 11, 12, 14, 16 };
-//Adafruit_ST7735 LABEL_OBEJCTS[4];
+int LABEL_LED_PINS[] = { 36, 37, 38, 39 };
+Adafruit_ST7735* LABEL_DISPLAYS[4] = {};
+int LABEL_LEDS[4] = {};
 
 int ACTIVE_MODULES = 0;
 int MODULE_COUNT = 8;
 int MODULE_ADDRESSES[] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
 int ASSIGNED_REQUEST_PINS[] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
+bool SOLVED_MODULES[] = { true, true, true, true, true, true, true, true, true, true, true };
+bool NEEDY_MODULES[] = { false, false, false, false, false, false, false, false, false, false, false };
+bool READY_MODULES[] = { true, true, true, true, true, true, true, true, true, true, true };
+String MODULE_TYPES[] = { "", "", "", "", "", "", "", "", "", "", "" };
+int MISTAKE_TRACE[] = { -1, -1, -1 };
 int randomnessSeed = 0;
 
 const bool debug = true;
@@ -67,7 +103,7 @@ bool scanForRequest = false;
 
 /* PIN DEFINITIONS */
 const uint8_t RANDOMNESS_SOURCE = A1;
-const int REQUEST_INTERRUPT_PIN = 2;
+const int REQUEST_INTERRUPT_PIN = 3;
 const int MENU_DISPLAY_CS_PIN = 46;
 const int MENU_DISPLAY_RST_PIN = 44;
 const int MENU_DISPLAY_DC_PIN = 5;
@@ -80,6 +116,9 @@ const int SERIAL_DISPLAY_HEIGHT = 122; // DEPG0213BN
 const int ROTENC_BTN = 19;
 const int ROTENC_A = 22;
 const int ROTENC_B = 23;
+const int CLOCK_PIN = 45;
+const int MISTAKE_A_LED = 32;
+const int MISTAKE_B_LED = 33;
 
 /* GAME BOUNDARIES */
 // Ports
@@ -100,7 +139,10 @@ const String possibleBatteryTypes[] = {"AA", "D"};
 
 /* GAME SETTINGS */
 int baseLives = 3;
+int currentLives = -1;
 int baseTime = 480;
+int currentTime = -1;
+String gameResult = "";
 String serialNumber = "";
 Label bombLabels[maxLabels] = {};
 int generatedLabelCount = 0;
@@ -134,46 +176,95 @@ int rotEncLastButtonState = HIGH;  // the previous reading from the input pin
 unsigned long rotEncLastDebounceTime = 0;  // the last time the output pin was toggled
 unsigned long rotEncDebounceDelay = 50;    // the debounce time; increase if the output flickers
 
+int globalState = 1;
+/*
+ * 1  boot
+ * 2  menu / settings
+ * 3  provisioning
+ * 4  wait for ready
+ * 5  countdown
+ * 6  enable displays
+ * 7  game
+ * 8  game ended
+ */
+
 void setup()
 {
   if (debug) {
     Serial.begin(9600);
   }
-
   seedRandomness();
-  //delay(random(100,300));
-  seedRandomness();
+  initializeMenuDisplay();
+  displayTextOnMenuDisplay("Please wait...");
   initializeRequestPins();
   //initializeSerialDisplay();
-  initializeMenuDisplay();
+  initializeLabelLEDs();
+  initializeMistakeLEDs();
+  Wire.begin();
+  discoverModules();
+  blankMenuDisplay();
   displayMenu();
 
-  pinMode(18, INPUT_PULLUP);
-  Wire.begin();
-  //discoverModules();
+  checkSolved();
 
-  setupGame();
-  //testMenu();
-  //initializeLabelDisplays();
-  //provisionModules();
-
- // enableModuleInterrupt();
-
-  displaySerialNumber();
- // delay(5000);
- // blankSerialNumber();
-  /*
-  propagateSettingsToModules();
-  requestReadyStatusFromModules();
-  displaySerialNumber();
-  */
+  globalState = 2;
 }
 
 void loop()
 {
-  doScanForRequests();
-  checkRotEncButton();
-  checkRotEnc();
+  switch (globalState) {
+    case 1:
+      //doScanForRequests();
+      break;
+    case 2:
+      checkRotEncButton();
+      checkRotEnc();
+      break;
+    case 3:
+      displayTextOnMenuDisplay("Setting up Game");
+      setupGame();
+      displayTextOnMenuDisplay("Prov'ing Modules");
+      provisionModules();
+      initializeClock();
+      //initializeLabelDisplays();
+      globalState = 4;
+      break;
+    case 4:
+      // if all ready: globalState = 5;
+      displayTextOnMenuDisplay("Wating on Modules");
+      doScanForRequests(true);
+      if (checkReady()) {
+        globalState = 5;
+      }
+      break;
+    case 5:
+      // if all ready: globalState = 5;
+      displayTextOnMenuDisplay("Ready?");
+      //displayLabels();
+      //displaySerialNumber();
+      displayTextOnMenuDisplay("3");
+      delay(1000);
+      displayTextOnMenuDisplay("2");
+      delay(1000);
+      displayTextOnMenuDisplay("1");
+      delay(1000);
+      enableModuleInterrupt();
+      startClock();
+      globalState = 6;
+      break;
+    case 6:
+      blankMenuDisplay();
+      globalState = 7;
+      break;
+    case 7:
+      doScanForRequests();
+      break;
+    case 8:
+      blankSerialNumber();
+      displayTextOnMenuDisplay(gameResult);
+      globalState = 99;
+      break;
+  }
 }
 
 void seedRandomness() {
@@ -213,6 +304,11 @@ void discoverModules() {
   disableRequestPinAction["action"] = "drp";
   String disableRequestPinCommand;
   serializeJson(disableRequestPinAction, disableRequestPinCommand);
+  
+  JsonDocument identificationAction;
+  identificationAction["action"] = "ident";
+  String identificationCommand;
+  serializeJson(identificationAction, identificationCommand);
 
   for (byte currentAddress = MODULE_START_ADDRESS; currentAddress <= MODULE_END_ADDRESS; currentAddress++) {
     byte error = sendCommand(currentAddress, pingCommand);
@@ -228,6 +324,20 @@ void discoverModules() {
 
       sendCommand(currentAddress, disableRequestPinCommand);
       delay(50);
+
+      sendCommand(currentAddress, identificationCommand);
+      delay(100);
+      String identData = readFromModule(currentAddress);
+
+      JsonDocument doc; 
+      deserializeJson(doc, identData);
+
+      const String moduleType = doc["type"];
+      const bool needy = doc["isNeedy"];
+
+      MODULE_TYPES[ACTIVE_MODULES - 1] = moduleType;
+      NEEDY_MODULES[ACTIVE_MODULES - 1] = needy;
+      READY_MODULES[ACTIVE_MODULES - 1] = false;
     }
   }
 
@@ -288,28 +398,48 @@ void enableModuleInterrupt() {
   attachInterrupt(digitalPinToInterrupt(REQUEST_INTERRUPT_PIN), incomingRequest, RISING);
 }
 
-void doScanForRequests() {
-  if (scanForRequest) {
+void doScanForRequests(bool alwaysCheck) {
+  if (scanForRequest || alwaysCheck) {
     for (int i = 0; i < 8; i++) {
       if (digitalRead(ASSIGNED_REQUEST_PINS[i]) == HIGH) {
-        bool keepTransmission = true;
-        while(keepTransmission) {
-          Wire.requestFrom(MODULE_ADDRESSES[i], 6, false);
-          while(Wire.available())
-          { 
-            char c = Wire.read();
-            if (c == '\0') {
-              keepTransmission = false;
-            }
-            if (keepTransmission) {
-            Serial.print(c); // TODO
-            }
-          }
+        String command = readFromModule(MODULE_ADDRESSES[i]);
+        
+        JsonDocument doc; 
+        deserializeJson(doc, command);
+
+        const String action = doc["action"];
+
+        if (action == "solved") {
+          markModuleAsSolved(i);
+        } else if (action == "mistake") {
+          addMistakeFromModule(i);
+        } else if (action == "ready") {
+          READY_MODULES[i] = true;
         }
       }
     }
     scanForRequest = false;
   }
+}
+
+String readFromModule(int address)
+{
+  String returnValue = "";
+  bool keepTransmission = true;
+  while(keepTransmission) {
+    Wire.requestFrom(address, 6, false);
+    while(Wire.available())
+    { 
+      char c = Wire.read();
+      if (c == '\0') {
+        keepTransmission = false;
+      }
+      if (keepTransmission) {
+        returnValue += c;
+      }
+    }
+  }
+  return returnValue;
 }
 
 void initializeSerialDisplay() {
@@ -433,6 +563,8 @@ void setupGame() {
   generateLabels();
   generateBatteries();
   generatePorts();
+  currentLives = baseLives;
+  currentTime = baseTime + 1;
 }
 
 void provisionModules() {
@@ -462,8 +594,8 @@ void provisionModules() {
 }
 
 void generateLabels() {
-  //int labelsToGenerate = random(0, maxLabels);
-  int labelsToGenerate = 4;
+  int labelsToGenerate = random(0, maxLabels);
+  labelsToGenerate = 4;
   
   int usedLabels[4] = {-1, -1, -1, -1};
   for (int i = 0; i < labelsToGenerate; i++) {
@@ -511,30 +643,38 @@ void broadcastToAllModules(String command) {
   }
 }
 void initializeLabelDisplays() {
-  /*const size_t n = sizeof(LABEL_PINS) / sizeof(LABEL_PINS[0]);
+  const size_t n = sizeof(LABEL_PINS) / sizeof(LABEL_PINS[0]);
 
   for (size_t i = 0; i < n - 1; i++)
   {
       size_t j = random(0, n - i);
       int t = LABEL_PINS[i];
+      int ledT = LABEL_LED_PINS[i];
       LABEL_PINS[i] = LABEL_PINS[j];
+      LABEL_LED_PINS[i] = LABEL_LED_PINS[j];
       LABEL_PINS[j] = t;
-  }
-  */
+      LABEL_LED_PINS[j] = ledT;
+}
+
   for (int i = 0; i < 4; i++) {
-    Adafruit_ST7735 tft = Adafruit_ST7735(LABEL_PINS[i], /* DC */6, /* MOSI */7, /* SCK*/ 8, 9);
-    tft.initR(INITR_MINI160x80_PLUGIN);
-    tft.setRotation(3);
-    tft.fillScreen(ST7735_WHITE);
-    
-    tft.setTextWrap(false);
-    tft.setTextSize(7);
-    tft.setTextColor(ST77XX_BLACK);
-    tft.setCursor(20, 20);
+    LABEL_DISPLAYS[i] = new Adafruit_ST7735(LABEL_PINS[i], /* DC */ 6, /* MOSI */ 7, /* SCK */ 8, /* RST */ 9);
+    LABEL_DISPLAYS[i]->initR(INITR_MINI160x80_PLUGIN);
+    LABEL_DISPLAYS[i]->setRotation(3);
+    LABEL_DISPLAYS[i]->fillScreen(ST7735_WHITE);
+  }
+}
+void displayLabels() {
+  for (int i = 0; i < 4; i++) {
+    LABEL_DISPLAYS[i]->setTextWrap(false);
+    LABEL_DISPLAYS[i]->setTextSize(7);
+    LABEL_DISPLAYS[i]->setTextColor(ST77XX_BLACK);
+    LABEL_DISPLAYS[i]->setCursor(20, 20);
     if (generatedLabelCount >= i) {
-      tft.println(bombLabels[i].label);
+      LABEL_DISPLAYS[i]->println(bombLabels[i].label);
+      if (bombLabels[i].lit) {
+        digitalWrite(LABEL_LED_PINS[i], HIGH);
+      }
     }
-    //LABEL_OBEJCTS[i] = tft;
   }
 }
   
@@ -560,9 +700,9 @@ void checkRotEnc() {
       }
     } else if (selectedMenuPosition == 2) {
       if (direction == -1) {
-        baseTime -= 10;
+        baseTime -= 30;
       } else if (direction == 1) {
-        baseTime += 10;
+        baseTime += 30;
       }
       if (baseTime <= 60) {
         baseTime = 60;
@@ -592,9 +732,121 @@ void checkRotEncButton() {
         } else {
           selectedMenuPosition = 0;
         }
-        displayMenu();
+        if (selectedMenuPosition == 3) {
+          globalState = 3;
+          menuDisplay.fillRect(0, 0, 320, 240, ST77XX_BLACK);
+        } else {
+          displayMenu();
+        }
       }
     }
   }
   rotEncLastButtonState = reading;
+}
+
+void blankMenuDisplay()
+{
+  menuDisplay.fillRect(0, 0, 320, 240, ST77XX_BLACK);
+}
+
+void displayTextOnMenuDisplay(String message)
+{
+  int messageLength = message.length();
+  int letterWidth = 18;
+
+  menuDisplay.fillRect(0, 0, 320, 240, ST77XX_BLACK);
+  menuDisplay.setTextWrap(false);
+  menuDisplay.setTextColor(ST77XX_WHITE);
+  menuDisplay.setTextSize(3);
+  menuDisplay.setCursor(((320 - (messageLength * letterWidth)) / 2), 110);
+
+  menuDisplay.setTextColor(ST77XX_WHITE);
+  menuDisplay.println(message);
+}
+
+void initializeLabelLEDs()
+{
+  for (int i = 0; i < 4; i++) {
+    pinMode(LABEL_LED_PINS[i], OUTPUT);
+  }
+}
+
+void checkSolved()
+{
+  bool solved = true;
+  for (int i = 0; i < 11; i++) {
+    if (!SOLVED_MODULES[i]) {
+      solved = false;
+    }
+  }
+  if (solved) {
+    gameResult = "success";
+    globalState = 8;
+  }
+}
+
+void initializeClock()
+{
+  Timer5.initialize(1000000);
+}
+
+void startClock()
+{
+  Timer5.pwm(CLOCK_PIN, 100);
+}
+
+void stopClock()
+{
+  Timer5.stop();
+}
+
+void initializeMistakeLEDs()
+{
+  pinMode(MISTAKE_A_LED, OUTPUT);
+  pinMode(MISTAKE_B_LED, OUTPUT);
+}
+
+void enableMistakeLED()
+{
+  int mistakeCount = baseLives - currentLives;
+  if (mistakeCount == 1) {
+    digitalWrite(MISTAKE_A_LED, HIGH);
+  }
+  if (mistakeCount == 2) {
+    digitalWrite(MISTAKE_B_LED, HIGH);
+  }
+}
+
+void markModuleAsSolved(int moduleId)
+{
+  SOLVED_MODULES[moduleId] = true;
+  checkSolved();
+}
+
+void addMistakeFromModule(int moduleId)
+{
+  currentLives--;
+  int mistakeCount = baseLives - currentLives;
+
+  MISTAKE_TRACE[mistakeCount - 1] = moduleId;
+  enableMistakeLED();
+  checkMistakes();
+}
+
+void checkMistakes()
+{
+  if (currentLives == 0) {
+    gameResult = "failed";
+    globalState = 8;
+  }
+}
+
+bool checkReady()
+{
+  for (int i = 0; i < 11; i++) {
+    if (!READY_MODULES[i]) {
+      return false;
+    }
+  }
+  return true;
 }
